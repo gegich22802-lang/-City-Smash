@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Город — City Smash</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="c"></canvas>
+  
+  <div class="clock" id="clock">06:00</div>
+  <div class="weather" id="weather">☀ Ясно</div>
+
+  <!-- Выдвижная панель действий -->
+  <div class="fab-container">
+    <div class="fab-menu" id="fabMenu">
+      <button class="fab-item" id="btnFirework" title="Запустить салют">🎆</button>
+      <button class="fab-item" id="btnMeteor" title="Вызвать метеорит">☄</button>
+      
+      <!-- Подменю погоды -->
+      <div class="fab-submenu" id="fabSubmenu">
+        <button class="fab-subitem" data-weather="clear" title="Ясно">☀</button>
+        <button class="fab-subitem" data-weather="rain" title="Дождь">🌧</button>
+        <button class="fab-subitem" data-weather="snow" title="Снег">❄</button>
+        <button class="fab-subitem" data-weather="fog" title="Туман">🌫</button>
+        <button class="fab-subitem" data-weather="storm" title="Гроза">⛈</button>
+      </div>
+
+      <button class="fab-item" id="btnWeather" title="Погода">🌦</button>
+      <button class="fab-item" id="btnQuake" title="Землетрясение">🫨</button>
+      <button class="fab-item" id="btnUfo" title="Прилет НЛО">🛸</button>
+    </div>
+    <button class="fab-toggle" id="fabToggle">⚙️</button>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
