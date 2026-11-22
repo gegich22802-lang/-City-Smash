@@ -1,6 +1,6 @@
 'use strict';
 
-/* Утилиты (должны быть объявлены до использования) */
+/* Утилиты */
 const rand = (a, b) => a + Math.random() * (b - a);
 const lerp = (a, b, k) => a + (b - a) * k;
 const smooth = k => k * k * (3 - 2 * k);
@@ -8,10 +8,11 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const mix = (a, b, k) => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
 const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
 
+const isMobile = window.innerWidth < 768 || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d', { alpha: false });
 const clockEl = document.getElementById('clock');
-const countdownEl = document.getElementById('countdown');
 const weatherEl = document.getElementById('weather');
 
 let W = 0, H = 0, S = 1;
@@ -24,20 +25,17 @@ let elapsed = 0;
 let buildings = [], lights = [], people = [], cars = [], stars = [];
 let shakeOffsetX = 0, shakeOffsetY = 0, lastDarkness = 0;
 
-const ripples = [], rainDrops = [], snowflakes = [], lightnings = [], fireworks = [], ufos = [], flocks = [];
+const ripples = [], rainDrops = [], snowflakes = [], lightnings = [], fireworks = [], ufos = [], flocks = [], miniMeteors = [];
 let lightningFlash = 0;
 
-const weather = { type: 'clear', intensity: 0, timer: 0, duration: 40, nextFlash: 4 };
+const weather = { type: 'clear', intensity: 0, nextFlash: 4 };
 let currentWeatherType = 'clear';
 
-let quakeT = 0, nextQuake = rand(40, 80), nextUfo = rand(30, 60), nextFlock = rand(15, 35);
-
-const trafficLights = [];
-const trafficState = { state: 'green', t: 0 };
+let quakeT = 0;
 
 const meteor = {
   triggered: false, phase: 'idle', phaseT: 0, incomingDur: 1.9, flash: 0, shake: 0,
-  x0: 0, y0: 0, ix: 0, iy: 0, craterR: 0, craterTargetR: 0, fireUntil: 0
+  x0: 0, y0: 0, ix: 0, iy: 0, targetBuilding: null
 };
 let boomParticles = [];
 
@@ -52,7 +50,7 @@ grainCanvas.width = grainCanvas.height = 256;
   }
   g2.putImageData(id, 0, 0);
 }
-let grainPattern = null;
+let grainPattern = null, grainEnabled = true;
 
 function roundRect(x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
@@ -100,7 +98,11 @@ function generateCity() {
     while (x < W + 90 * S) {
       const w = rand(L.wMin, L.wMax) * S;
       const h = rand(L.hMin, L.hMax) * groundY;
-      const b = { x, w, h, y: groundY - h, color: L.color, layer: li, haze: L.haze, tint: 0.85 + Math.random() * 0.3, antenna: Math.random() < 0.28, windows: [], lightOverride: null };
+      const b = { 
+        x, w, h, baseH: h, y: groundY - h, color: L.color, layer: li, haze: L.haze, 
+        tint: 0.85 + Math.random() * 0.3, antenna: Math.random() < 0.28, windows: [], lightOverride: null,
+        destroyed: false, smokeT: 0
+      };
       if (L.windows) {
         const pad = 6 * S, gx = 10 * S, gy = 14 * S, ww = 4.5 * S, wh = 6.5 * S;
         const cols = Math.max(0, Math.floor((w - pad * 2) / gx));
@@ -121,11 +123,6 @@ function generateLights() {
   lights = [];
   const spacing = 190 * S;
   for (let x = spacing * 0.6; x < W + spacing; x += spacing) lights.push({ x, override: null });
-}
-
-function initTrafficLights() {
-  trafficLights.length = 0;
-  trafficLights.push({ x: W * 0.32 }); trafficLights.push({ x: W * 0.72 });
 }
 
 function generateStars() {
@@ -153,7 +150,7 @@ function makePerson(spawnAnywhere) {
 
 function generatePeople() {
   people = [];
-  const n = clamp(Math.round(W / 55), 8, 46);
+  const n = isMobile ? clamp(Math.round(W / 100), 5, 15) : clamp(Math.round(W / 55), 8, 46);
   for (let i = 0; i < n; i++) people.push(makePerson(true));
 }
 
@@ -167,7 +164,7 @@ function makeCar() {
 
 function generateCars() {
   cars = [];
-  const n = clamp(Math.round(W / 320), 2, 7);
+  const n = isMobile ? 3 : clamp(Math.round(W / 320), 2, 7);
   for (let i = 0; i < n; i++) cars.push(makeCar());
 }
 
@@ -199,24 +196,56 @@ function drawBuildings(sky, darkness, hoveredBuilding) {
   for (const b of buildings) {
     let col = [b.color[0]*amb*b.tint, b.color[1]*amb*b.tint, b.color[2]*amb*b.tint];
     col = mix(col, horizon, b.haze);
-    ctx.fillStyle = rgb(col); ctx.fillRect(b.x, b.y, b.w, b.h);
-    if (b === hoveredBuilding) { ctx.strokeStyle = 'rgba(140,200,255,0.55)'; ctx.lineWidth = 1.5; ctx.strokeRect(b.x+0.75, b.y+0.75, b.w-1.5, b.h-1.5); }
-    if (b.windows.length && b.lightOverride !== false) {
+    
+    const currentY = b.y + (b.baseH - b.h);
+    
+    ctx.fillStyle = rgb(col);
+    if (b.destroyed) {
+      ctx.beginPath();
+      ctx.moveTo(b.x, groundY);
+      ctx.lineTo(b.x, currentY);
+      for(let i=1; i<=5; i++) {
+        ctx.lineTo(b.x + b.w*(i/5), currentY - rand(-5, 5)*S);
+      }
+      ctx.lineTo(b.x + b.w, groundY);
+      ctx.fill();
+    } else {
+      ctx.fillRect(b.x, currentY, b.w, b.h);
+    }
+
+    if (b === hoveredBuilding) {
+      ctx.strokeStyle = 'rgba(255, 60, 60, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x + 0.75, currentY + 0.75, b.w - 1.5, b.h - 1.5);
+      const cx = b.x + b.w/2, cy = currentY + b.h/2;
+      ctx.beginPath(); ctx.moveTo(cx - 10, cy); ctx.lineTo(cx + 10, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, cy - 10); ctx.lineTo(cx, cy + 10); ctx.stroke();
+    }
+
+    if (b.windows.length && b.lightOverride !== false && !b.destroyed) {
       let thr, warmA, coolA;
       if (b.lightOverride === true) { thr = 0.92; warmA = 0.95; coolA = 0.9; }
       else { thr = 0.05 + darkness * 0.84; warmA = 0.45 + darkness * 0.45; coolA = 0.35 + darkness * 0.35; }
       ctx.beginPath();
-      for (const w of b.windows) { if (b.lightOverride !== true && Math.random() < 0.0007) w.seed = Math.random(); if (w.seed < thr && w.warm) ctx.rect(w.x, w.y, w.w, w.h); }
+      for (const w of b.windows) { 
+        if (currentY + (w.y - b.y) > groundY) continue;
+        if (b.lightOverride !== true && Math.random() < 0.0007) w.seed = Math.random(); 
+        if (w.seed < thr && w.warm) ctx.rect(w.x, currentY + (w.y - b.y), w.w, w.h); 
+      }
       ctx.fillStyle = `rgba(255,212,138,${warmA})`; ctx.fill();
       ctx.beginPath();
-      for (const w of b.windows) { if (w.seed < thr && !w.warm) ctx.rect(w.x, w.y, w.w, w.h); }
+      for (const w of b.windows) { 
+        if (currentY + (w.y - b.y) > groundY) continue;
+        if (w.seed < thr && !w.warm) ctx.rect(w.x, currentY + (w.y - b.y), w.w, w.h); 
+      }
       ctx.fillStyle = `rgba(170,208,255,${coolA})`; ctx.fill();
     }
-    if (b.antenna) {
-      ctx.fillStyle = rgb(col); ctx.fillRect(b.x + b.w * 0.5 - S, b.y - 20 * S, 2 * S, 20 * S);
+    
+    if (b.antenna && !b.destroyed) {
+      ctx.fillStyle = rgb(col); ctx.fillRect(b.x + b.w * 0.5 - S, currentY - 20 * S, 2 * S, 20 * S);
       if (darkness > 0.25) {
         const blink = 0.5 + 0.5 * Math.sin(elapsed * 3 + b.x * 0.05);
-        ctx.fillStyle = `rgba(255,70,70,${blink * darkness * 0.9})`; ctx.beginPath(); ctx.arc(b.x + b.w * 0.5, b.y - 20 * S, 2.2 * S, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = `rgba(255,70,70,${blink * darkness * 0.9})`; ctx.beginPath(); ctx.arc(b.x + b.w * 0.5, currentY - 20 * S, 2.2 * S, 0, Math.PI * 2); ctx.fill();
       }
     }
   }
@@ -240,26 +269,6 @@ function drawSidewalk(sky) {
   ctx.strokeStyle = `rgba(0,0,0,${0.10 + sky.light * 0.06})`; ctx.lineWidth = 1;
   for (let k = 1; k < 3; k++) { const y = sidewalkY + (sidewalkH * k) / 3; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
   ctx.fillStyle = `rgba(255,255,255,${0.04 + sky.light * 0.05})`; ctx.fillRect(0, sidewalkY + sidewalkH - 2 * S, W, 2 * S);
-}
-
-function drawTrafficLights() {
-  for (const tl of trafficLights) {
-    const poleX = tl.x, baseY = roadY + 2 * S, topY = roadY - 92 * S;
-    ctx.fillStyle = '#1a1a22'; ctx.fillRect(poleX - 1.5 * S, topY, 3 * S, baseY - topY);
-    const hw = 11 * S, hh = 30 * S, hx = poleX - hw / 2, hy = topY - hh;
-    ctx.fillStyle = '#0b0b12'; roundRect(hx, hy, hw, hh, 3 * S); ctx.fill();
-    const r = 3.4 * S, ys = [hy + 6 * S, hy + hh / 2, hy + hh - 6 * S];
-    const cols = [trafficState.state === 'red' ? '#ff3a3a' : '#442020', trafficState.state === 'yellow' ? '#ffb838' : '#443522', trafficState.state === 'green' ? '#3aff66' : '#224422'];
-    for (let i = 0; i < 3; i++) {
-      if ((i === 0 && trafficState.state === 'red') || (i === 1 && trafficState.state === 'yellow') || (i === 2 && trafficState.state === 'green')) {
-        ctx.save(); ctx.globalCompositeOperation = 'lighter';
-        const gl = ctx.createRadialGradient(poleX, ys[i], 0, poleX, ys[i], 12 * S);
-        gl.addColorStop(0, cols[i]); gl.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(poleX, ys[i], 12 * S, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-      }
-      ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.arc(poleX, ys[i], r, 0, Math.PI * 2); ctx.fill();
-    }
-  }
 }
 
 function isLightOn(L, darkness) {
@@ -321,7 +330,6 @@ function drawPerson(p) {
     ctx.beginPath(); ctx.moveTo(0, uy + 4 * sc); ctx.lineTo(0, headY); ctx.stroke();
     ctx.fillStyle = p.umbrellaColor; ctx.beginPath(); ctx.arc(0, uy + 4 * sc, 6.5 * sc, Math.PI, 0); ctx.fill();
   }
-  if (p.hover) { ctx.strokeStyle = 'rgba(255,230,130,0.85)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(0, headY - 5 * sc, 8 * sc, 0, Math.PI * 2); ctx.stroke(); }
   ctx.restore();
 }
 
@@ -360,14 +368,8 @@ function drawCars(darkness) {
 }
 
 /* Погода */
-function cycleWeather() {
-  const order = ['clear', 'rain', 'snow', 'fog', 'storm'];
-  const i = order.indexOf(weather.type);
-  setWeather(order[(i + 1) % order.length]);
-}
-
 function setWeather(type) {
-  weather.type = type; weather.intensity = 0; weather.timer = 0; weather.duration = rand(35, 60); weather.nextFlash = rand(2, 5); currentWeatherType = type;
+  weather.type = type; weather.intensity = 0; weather.nextFlash = rand(2, 5); currentWeatherType = type;
   rainDrops.length = 0; snowflakes.length = 0; lightnings.length = 0;
   const rainy = type === 'rain' || type === 'storm';
   for (const p of people) p.umbrella = rainy && Math.random() < 0.75;
@@ -384,11 +386,12 @@ function spawnLightning() {
 }
 
 function updateWeather(dt) {
-  weather.timer += dt; if (weather.timer > weather.duration) cycleWeather();
   const target = weather.type === 'clear' ? 0 : 1;
   weather.intensity = lerp(weather.intensity, target, dt * 0.9);
+  
   if (weather.type === 'rain' || weather.type === 'storm') {
-    const want = Math.floor((weather.type === 'storm' ? 420 : 220) * weather.intensity);
+    const baseCount = isMobile ? (weather.type === 'storm' ? 150 : 80) : (weather.type === 'storm' ? 420 : 220);
+    const want = Math.floor(baseCount * weather.intensity);
     while (rainDrops.length < want) rainDrops.push({ x: Math.random() * (W + 100) - 50, y: -20 - Math.random() * 40, vy: rand(750, 1150) * S, len: rand(11, 20) * S, wind: rand(-50, 50) });
     while (rainDrops.length > want) rainDrops.pop();
     for (const r of rainDrops) {
@@ -399,7 +402,8 @@ function updateWeather(dt) {
   } else rainDrops.length = 0;
 
   if (weather.type === 'snow') {
-    const want = Math.floor(180 * weather.intensity);
+    const baseCount = isMobile ? 80 : 180;
+    const want = Math.floor(baseCount * weather.intensity);
     while (snowflakes.length < want) snowflakes.push({ x: Math.random() * W, y: -10 - Math.random() * 20, vx: rand(-15, 15), vy: rand(25, 65) * S, r: rand(1.2, 3.5) * S, phase: rand(0, Math.PI * 2) });
     while (snowflakes.length > want) snowflakes.pop();
     for (const f of snowflakes) {
@@ -454,7 +458,7 @@ function launchFirework(x, y) {
 }
 
 function explodeFirework(fw) {
-  const n = 80;
+  const n = isMobile ? 40 : 80;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 + rand(-0.08, 0.08), sp = rand(120, 340) * S;
     fw.sparks.push({ x: fw.targetX, y: fw.targetY, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rand(1.0, 1.9), maxLife: 1.9, hue: fw.hue + rand(-25, 25) });
@@ -575,98 +579,117 @@ function drawBirds() {
 }
 
 /* Метеорит */
-function triggerMeteor() {
-  if (meteor.triggered) return;
-  meteor.triggered = true; meteor.phase = 'incoming'; meteor.phaseT = 0;
-  const fromRight = Math.random() < 0.5;
-  meteor.x0 = fromRight ? W * rand(1.0, 1.25) : W * rand(-0.25, 0); meteor.y0 = -H * 0.35;
-  meteor.ix = fromRight ? rand(W * 0.15, W * 0.65) : rand(W * 0.35, W * 0.85); meteor.iy = groundY + sidewalkH * 0.4;
-  meteor.craterTargetR = rand(62, 98) * S;
-}
-
-function doImpact() {
-  meteor.phase = 'impact'; meteor.phaseT = 0; meteor.flash = 1.0; meteor.shake = 55; meteor.fireUntil = elapsed + 14; meteor.craterR = 10 * S;
-  spawnBoom();
-  for (const p of people) {
-    const dx = p.x - meteor.ix, dy = p.y - meteor.iy;
-    if (Math.hypot(dx, dy) < 360 * S) { p.dir = dx >= 0 ? 1 : -1; p.baseSpeed *= 2.4; p.pauseT = 0; p.startleT = 3; }
+function destroyBuilding(b, big = false) {
+  if (b.destroyed) return;
+  b.destroyed = true;
+  b.smokeT = 8;
+  
+  const count = big ? (isMobile ? 40 : 80) : (isMobile ? 20 : 40);
+  const col = mix([b.color[0]*0.5, b.color[1]*0.5, b.color[2]*0.5], [0,0,0], b.haze);
+  
+  for(let i=0; i<count; i++) {
+    boomParticles.push({
+      x: b.x + rand(0, b.w), y: b.y + rand(0, b.baseH),
+      vx: rand(-150, 150), vy: rand(-300, -50),
+      life: rand(1.5, 3.5), maxLife: 3.5, size: rand(4, 15)*S,
+      color: rgb(col), type: 'buildingDebris'
+    });
   }
 }
 
-function spawnBoom() {
-  const ix = meteor.ix, iy = meteor.iy;
-  for (let i = 0; i < 70; i++) { const a = rand(-Math.PI * 0.95, -Math.PI * 0.05), sp = rand(150, 480), life = rand(1.5, 3.5); boomParticles.push({ x: ix + rand(-15, 15), y: iy - rand(0, 10), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, size: rand(2.5, 7) * S, type: 'debris' }); }
-  for (let i = 0; i < 130; i++) { const a = rand(-Math.PI * 0.95, -Math.PI * 0.05), sp = rand(200, 760), life = rand(0.4, 1.4); boomParticles.push({ x: ix + rand(-20, 20), y: iy + rand(-15, 5), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, size: rand(1.2, 3.2) * S, type: 'spark' }); }
-  for (let i = 0; i < 45; i++) { const a = rand(-Math.PI * 0.85, -Math.PI * 0.15), sp = rand(40, 180), life = rand(2.5, 5); boomParticles.push({ x: ix + rand(-30, 30), y: iy + rand(-10, 10), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6 - rand(20, 50), life, maxLife: life, size: rand(15, 35) * S, type: 'dust' }); }
+function triggerMeteor() {
+  if (meteor.triggered) return;
+  meteor.triggered = true; meteor.phase = 'incoming'; meteor.phaseT = 0;
+  
+  const intact = buildings.filter(b => !b.destroyed);
+  if (intact.length > 0) {
+    meteor.targetBuilding = intact[Math.floor(Math.random() * intact.length)];
+    meteor.ix = meteor.targetBuilding.x + meteor.targetBuilding.w / 2;
+    meteor.iy = meteor.targetBuilding.y;
+  } else {
+    meteor.ix = W / 2; meteor.iy = groundY;
+  }
+  
+  const fromRight = Math.random() < 0.5;
+  meteor.x0 = fromRight ? W * rand(1.0, 1.25) : W * rand(-0.25, 0); meteor.y0 = -H * 0.35;
 }
 
-function spawnFireParticle() {
-  const r = Math.random() * meteor.craterR * 0.85, a = rand(0, Math.PI * 2), fx = meteor.ix + Math.cos(a) * r, fy = meteor.iy + Math.sin(a) * r * 0.3, life = rand(0.7, 1.5);
-  boomParticles.push({ x: fx, y: fy, vx: rand(-8, 8), vy: rand(-55, -30), life, maxLife: life, size: rand(5, 11) * S, type: 'fire' });
+function doImpact() {
+  meteor.phase = 'impact'; meteor.phaseT = 0; meteor.flash = 1.0; meteor.shake = 45;
+  if (meteor.targetBuilding) destroyBuilding(meteor.targetBuilding, true);
+  spawnBoom(meteor.ix, meteor.iy, 1.5);
+  
+  for (const p of people) {
+    const dx = p.x - meteor.ix, dy = p.y - meteor.iy;
+    if (Math.hypot(dx, dy) < 500 * S) { p.dir = dx >= 0 ? 1 : -1; p.baseSpeed *= 2.4; p.pauseT = 0; p.startleT = 3; }
+  }
+}
+
+function spawnBoom(ix, iy, scale = 1) {
+  const countDebris = (isMobile ? 30 : 70) * scale;
+  const countSpark = (isMobile ? 50 : 130) * scale;
+  const countDust = (isMobile ? 20 : 45) * scale;
+
+  for (let i = 0; i < countDebris; i++) { const a = rand(-Math.PI * 0.95, -Math.PI * 0.05), sp = rand(150, 480), life = rand(1.5, 3.5); boomParticles.push({ x: ix + rand(-15, 15), y: iy - rand(0, 10), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, size: rand(2.5, 7) * S, type: 'debris' }); }
+  for (let i = 0; i < countSpark; i++) { const a = rand(-Math.PI * 0.95, -Math.PI * 0.05), sp = rand(200, 760), life = rand(0.4, 1.4); boomParticles.push({ x: ix + rand(-20, 20), y: iy + rand(-15, 5), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life, maxLife: life, size: rand(1.2, 3.2) * S, type: 'spark' }); }
+  for (let i = 0; i < countDust; i++) { const a = rand(-Math.PI * 0.85, -Math.PI * 0.15), sp = rand(40, 180), life = rand(2.5, 5); boomParticles.push({ x: ix + rand(-30, 30), y: iy + rand(-10, 10), vx: Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6 - rand(20, 50), life, maxLife: life, size: rand(15, 35) * S, type: 'dust' }); }
 }
 
 function updateMeteor(dt) {
-  if (!meteor.triggered && elapsed >= CYCLE * 2) triggerMeteor();
   if (meteor.phase === 'incoming') { meteor.phaseT += dt; if (meteor.phaseT >= meteor.incomingDur) doImpact(); }
   else if (meteor.phase === 'impact') meteor.phaseT += dt;
   if (meteor.flash > 0) meteor.flash = Math.max(0, meteor.flash - dt * 2.4);
   if (meteor.shake > 0) meteor.shake = Math.max(0, meteor.shake - dt * 75);
-  if (meteor.craterR < meteor.craterTargetR) meteor.craterR = Math.min(meteor.craterTargetR, meteor.craterR + dt * meteor.craterTargetR * 3.5);
-  if (meteor.phase !== 'idle' && elapsed < meteor.fireUntil) { if (Math.random() < 18 * dt) spawnFireParticle(); }
+  
   for (let i = boomParticles.length - 1; i >= 0; i--) {
     const p = boomParticles[i]; p.life -= dt;
     if (p.life <= 0) { boomParticles.splice(i, 1); continue; }
-    if (p.type === 'dust') { p.vx *= Math.pow(0.4, dt); p.vy = p.vy * Math.pow(0.4, dt) - 15 * dt; p.size += 25 * dt * S; }
-    else if (p.type === 'fire') { p.vy -= 20 * dt; p.vx *= Math.pow(0.6, dt); p.size *= Math.pow(0.55, dt); }
+    if (p.type === 'dust' || p.type === 'smoke') { p.vx *= Math.pow(0.4, dt); p.vy = p.vy * Math.pow(0.4, dt) - 15 * dt; p.size += 25 * dt * S; }
+    else if (p.type === 'buildingDebris') { p.vy += 600 * dt; p.vx *= Math.pow(0.9, dt); }
     else { p.vy += 450 * dt; p.vx *= Math.pow(0.75, dt); }
+    
     p.x += p.vx * dt; p.y += p.vy * dt;
-    if (p.type === 'debris' && p.y > meteor.iy + 8 * S) { p.y = meteor.iy + 8 * S; p.vy = -Math.abs(p.vy) * 0.3; p.vx *= 0.55; }
+    
+    if (p.type === 'debris' && p.y > groundY) { p.y = groundY; p.vy = -Math.abs(p.vy) * 0.3; p.vx *= 0.55; }
+    if (p.type === 'buildingDebris' && p.y > groundY) { p.life = 0; }
+  }
+  
+  for (let i = miniMeteors.length - 1; i >= 0; i--) {
+    const m = miniMeteors[i];
+    m.t += dt;
+    if (m.t >= m.dur) {
+      if (m.target && !m.target.destroyed) destroyBuilding(m.target);
+      spawnBoom(m.tx, m.ty, 0.8);
+      meteor.shake = Math.max(meteor.shake, 20);
+      miniMeteors.splice(i, 1);
+    }
   }
 }
 
 function drawMeteorTrail() {
-  if (meteor.phase !== 'incoming') return;
-  const k = meteor.phaseT / meteor.incomingDur, t = k * k, mx = lerp(meteor.x0, meteor.ix, t), my = lerp(meteor.y0, meteor.iy, t);
-  const dx = meteor.ix - meteor.x0, dy = meteor.iy - meteor.y0, len = Math.hypot(dx, dy) || 1, nx = dx / len, ny = dy / len;
-  const trailLen = (120 + 300 * t) * S, tx = mx - nx * trailLen, ty = my - ny * trailLen;
-  const grad = ctx.createLinearGradient(tx, ty, mx, my);
-  grad.addColorStop(0, 'rgba(255,90,30,0)'); grad.addColorStop(0.6, 'rgba(255,160,80,0.55)'); grad.addColorStop(1, 'rgba(255,240,210,0.95)');
-  ctx.strokeStyle = grad; ctx.lineWidth = (6 + 7 * t) * S; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(mx, my); ctx.stroke();
-  ctx.save(); ctx.globalCompositeOperation = 'lighter';
-  const hg = ctx.createRadialGradient(mx, my, 0, mx, my, 55 * S);
-  hg.addColorStop(0, 'rgba(255,250,220,0.9)'); hg.addColorStop(0.3, 'rgba(255,200,130,0.5)'); hg.addColorStop(1, 'rgba(255,140,60,0)');
-  ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(mx, my, 55 * S, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  ctx.fillStyle = '#fffbe0'; ctx.beginPath(); ctx.arc(mx, my, 6 * S, 0, Math.PI * 2); ctx.fill();
-}
-
-function drawCrater() {
-  if (meteor.craterR < 1) return;
-  const cx = meteor.ix, cy = meteor.iy, r = meteor.craterR;
-  ctx.save(); ctx.translate(cx, cy); ctx.scale(1, 0.35);
-  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-  g.addColorStop(0, 'rgba(12,6,3,0.95)'); g.addColorStop(0.55, 'rgba(30,15,8,0.9)'); g.addColorStop(0.85, 'rgba(70,45,25,0.65)'); g.addColorStop(1, 'rgba(90,65,40,0)');
-  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  if (elapsed < meteor.fireUntil) {
-    const k = Math.min(1, (meteor.fireUntil - elapsed) / 5), flicker = 0.75 + Math.sin(elapsed * 9) * 0.25;
-    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.translate(cx, cy); ctx.scale(1, 0.4);
-    const rg = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.2);
-    rg.addColorStop(0, `rgba(255,160,60,${0.55 * k * flicker})`); rg.addColorStop(0.5, `rgba(255,80,20,${0.22 * k})`); rg.addColorStop(1, 'rgba(255,50,10,0)');
-    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(0, 0, r * 2.2, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  if (meteor.phase === 'incoming') {
+    const k = meteor.phaseT / meteor.incomingDur, t = k * k, mx = lerp(meteor.x0, meteor.ix, t), my = lerp(meteor.y0, meteor.iy, t);
+    const dx = meteor.ix - meteor.x0, dy = meteor.iy - meteor.y0, len = Math.hypot(dx, dy) || 1, nx = dx / len, ny = dy / len;
+    const trailLen = (120 + 300 * t) * S, tx = mx - nx * trailLen, ty = my - ny * trailLen;
+    const grad = ctx.createLinearGradient(tx, ty, mx, my);
+    grad.addColorStop(0, 'rgba(255,90,30,0)'); grad.addColorStop(0.6, 'rgba(255,160,80,0.55)'); grad.addColorStop(1, 'rgba(255,240,210,0.95)');
+    ctx.strokeStyle = grad; ctx.lineWidth = (6 + 7 * t) * S; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(mx, my); ctx.stroke();
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const hg = ctx.createRadialGradient(mx, my, 0, mx, my, 55 * S);
+    hg.addColorStop(0, 'rgba(255,250,220,0.9)'); hg.addColorStop(0.3, 'rgba(255,200,130,0.5)'); hg.addColorStop(1, 'rgba(255,140,60,0)');
+    ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(mx, my, 55 * S, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    ctx.fillStyle = '#fffbe0'; ctx.beginPath(); ctx.arc(mx, my, 6 * S, 0, Math.PI * 2); ctx.fill();
   }
-}
-
-function drawBoomParticles() {
-  for (const p of boomParticles) { if (p.type !== 'dust') continue; const a = p.life / p.maxLife; ctx.fillStyle = `rgba(90,70,55,${a * 0.35})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill(); }
-  for (const p of boomParticles) { if (p.type !== 'debris') continue; const a = Math.min(1, (p.life / p.maxLife) * 1.5); ctx.fillStyle = `rgba(45,30,22,${a})`; ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size); }
-  ctx.save(); ctx.globalCompositeOperation = 'lighter';
-  for (const p of boomParticles) {
-    if (p.type !== 'spark' && p.type !== 'fire') continue;
-    const a = Math.min(1, p.life / p.maxLife);
-    if (p.type === 'spark') { const gcol = (150 + 105 * a) | 0, bcol = (40 * a) | 0; ctx.fillStyle = `rgba(255,${gcol},${bcol},${a})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill(); }
-    else { const sz = Math.max(0.5, p.size); const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, sz); grad.addColorStop(0, `rgba(255,230,150,${a * 0.9})`); grad.addColorStop(0.5, `rgba(255,130,40,${a * 0.6})`); grad.addColorStop(1, 'rgba(255,60,20,0)'); ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(p.x, p.y, sz, 0, Math.PI * 2); ctx.fill(); }
+  
+  for (const m of miniMeteors) {
+    const k = m.t / m.dur, t = k * k, mx = lerp(m.sx, m.tx, t), my = lerp(m.sy, m.ty, t);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(255, 150, 50, 0.8)'; ctx.lineWidth = 3 * S; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(mx, my - 50*S); ctx.lineTo(mx, my); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(mx, my, 4 * S, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
-  ctx.restore();
 }
 
 function drawShockwave() {
@@ -674,7 +697,7 @@ function drawShockwave() {
   const k = meteor.phaseT / 1.5; if (k >= 1) return;
   const r = k * Math.max(W, H) * 0.7;
   ctx.save(); ctx.strokeStyle = `rgba(255,220,180,${(1 - k) * 0.55})`; ctx.lineWidth = (5 * (1 - k) + 1) * S;
-  ctx.beginPath(); ctx.ellipse(meteor.ix, meteor.iy, r, r * 0.35, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+  ctx.beginPath(); ctx.ellipse(meteor.ix, meteor.iy + (groundY-meteor.iy)*k, r, r * 0.35, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
 }
 
 function drawRipples() {
@@ -683,6 +706,37 @@ function drawRipples() {
     ctx.strokeStyle = `rgba(${cr},${cg},${cb},${a * 0.9})`; ctx.lineWidth = 2 * S;
     ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2); ctx.stroke();
   }
+}
+
+function drawBoomParticles() {
+  for (const p of boomParticles) { 
+    if (p.type !== 'dust' && p.type !== 'smoke') continue; 
+    const a = p.life / p.maxLife; 
+    ctx.fillStyle = p.type === 'smoke' ? `rgba(60,60,65,${a * 0.4})` : `rgba(90,70,55,${a * 0.35})`; 
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill(); 
+  }
+  
+  for (const p of boomParticles) { 
+    if (p.type === 'buildingDebris') {
+      const a = Math.min(1, (p.life / p.maxLife) * 2);
+      ctx.fillStyle = p.color; ctx.globalAlpha = a;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      ctx.globalAlpha = 1;
+    }
+    else if (p.type === 'debris') { 
+      const a = Math.min(1, (p.life / p.maxLife) * 1.5); 
+      ctx.fillStyle = `rgba(45,30,22,${a})`; ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size); 
+    }
+  }
+  
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const p of boomParticles) {
+    if (p.type !== 'spark') continue;
+    const a = Math.min(1, p.life / p.maxLife), gcol = (150 + 105 * a) | 0, bcol = (40 * a) | 0; 
+    ctx.fillStyle = `rgba(255,${gcol},${bcol},${a})`; 
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill(); 
+  }
+  ctx.restore();
 }
 
 /* Обновление */
@@ -700,28 +754,37 @@ function update(dt) {
   }
 
   for (const car of cars) {
-    let targetSpeed = car.baseSpeed, frontX = car.x + car.dir * car.len * 0.5;
-    for (const tl of trafficLights) {
-      const dist = (tl.x - frontX) * car.dir;
-      if (dist > 0 && dist < 90 * S && (trafficState.state === 'red' || (trafficState.state === 'yellow' && dist > 30 * S))) targetSpeed = 0;
-    }
-    car.currentSpeed = lerp(car.currentSpeed, targetSpeed, dt * 3);
+    car.currentSpeed = lerp(car.currentSpeed, car.baseSpeed, dt * 3);
     car.x += car.dir * car.currentSpeed * dt;
     const m = 260 * S;
     if (car.dir > 0 && car.x > W + m) Object.assign(car, makeCar(), { x: -m });
     else if (car.dir < 0 && car.x < -m) Object.assign(car, makeCar(), { x: W + m });
   }
 
-  trafficState.t += dt;
-  if (trafficState.state === 'green' && trafficState.t > 8) { trafficState.state = 'yellow'; trafficState.t = 0; }
-  else if (trafficState.state === 'yellow' && trafficState.t > 2.5) { trafficState.state = 'red'; trafficState.t = 0; }
-  else if (trafficState.state === 'red' && trafficState.t > 7) { trafficState.state = 'green'; trafficState.t = 0; }
-
   for (let i = ripples.length - 1; i >= 0; i--) { const r = ripples[i]; r.life -= dt; if (r.life <= 0) ripples.splice(i, 1); else r.r = r.maxR * (1 - r.life / r.maxLife); }
 
-  nextQuake -= dt; if (nextQuake <= 0) { quakeT = rand(3, 5); nextQuake = rand(50, 100); } if (quakeT > 0) quakeT -= dt;
-  nextUfo -= dt; if (nextUfo <= 0) { spawnUfo(); nextUfo = rand(30, 60); }
-  nextFlock -= dt; if (nextFlock <= 0) { spawnFlock(); nextFlock = rand(15, 35); }
+  if (quakeT > 0) quakeT -= dt;
+  
+  for (const b of buildings) {
+    if (b.destroyed) {
+      if (b.h > 15 * S) {
+        b.h -= dt * 150 * S;
+        if (b.h < 15 * S) b.h = 15 * S;
+        b.windows = [];
+      }
+      
+      if (b.smokeT > 0) {
+        b.smokeT -= dt;
+        if (Math.random() < 2 * dt) {
+          boomParticles.push({
+            x: b.x + rand(0, b.w), y: groundY - b.h - rand(0,10), 
+            vx: rand(-10, 10), vy: rand(-20, -5), 
+            life: rand(2, 4), maxLife: 4, size: rand(10, 20)*S, type: 'smoke'
+          });
+        }
+      }
+    }
+  }
 }
 
 /* Взаимодействие */
@@ -729,23 +792,31 @@ let hoveredPerson = null, hoveredLight = null, hoveredBuilding = null;
 
 function canvasCoords(e) {
   const rect = canvas.getBoundingClientRect();
-  return { x: e.clientX - rect.left - shakeOffsetX, y: e.clientY - rect.top - shakeOffsetY };
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  return { x: clientX - rect.left - shakeOffsetX, y: clientY - rect.top - shakeOffsetY };
 }
 
 function hitPerson(x, y) {
   let best = null, bestY = -Infinity;
   for (const p of people) {
     const sc = p.scale * S, py = p.y - 9 * sc + (p.jumpY || 0);
-    if (Math.abs(x - p.x) < 10 * sc && Math.abs(y - py) < 13 * sc && p.y > bestY) { best = p; bestY = p.y; }
+    const hitRadius = isMobile ? 20 : 10;
+    if (Math.abs(x - p.x) < hitRadius * sc && Math.abs(y - py) < hitRadius * 1.3 * sc && p.y > bestY) { best = p; bestY = p.y; }
   }
   return best;
 }
 function hitLight(x, y) {
-  for (const L of lights) { const lx = L.x + 26 * S, ly = sidewalkY - 84 * S + 3 * S; if (Math.hypot(x - lx, y - ly) < 24 * S) return L; }
+  const hitRad = isMobile ? 35 : 24;
+  for (const L of lights) { const lx = L.x + 26 * S, ly = sidewalkY - 84 * S + 3 * S; if (Math.hypot(x - lx, y - ly) < hitRad * S) return L; }
   return null;
 }
 function hitBuilding(x, y) {
-  for (let i = buildings.length - 1; i >= 0; i--) { const b = buildings[i]; if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b; }
+  for (let i = buildings.length - 1; i >= 0; i--) { 
+    const b = buildings[i]; 
+    const currentY = b.y + (b.baseH - b.h);
+    if (!b.destroyed && x >= b.x && x <= b.x + b.w && y >= currentY && y <= groundY) return b; 
+  }
   return null;
 }
 function hitRoad(x, y) { return y >= roadY && y <= roadY + roadH; }
@@ -754,8 +825,10 @@ function updateHover(x, y) {
   if (hoveredPerson) hoveredPerson.hover = false;
   hoveredPerson = hitPerson(x, y); hoveredLight = hitLight(x, y);
   hoveredBuilding = hoveredPerson || hoveredLight ? null : hitBuilding(x, y);
+  
   if (hoveredPerson) { hoveredPerson.hover = true; canvas.style.cursor = 'pointer'; return; }
-  if (hoveredLight || hoveredBuilding) { canvas.style.cursor = 'pointer'; return; }
+  if (hoveredLight) { canvas.style.cursor = 'pointer'; return; }
+  if (hoveredBuilding) { canvas.style.cursor = 'crosshair'; return; } 
   if (hitRoad(x, y)) { canvas.style.cursor = 'copy'; return; }
   canvas.style.cursor = 'default';
 }
@@ -767,19 +840,27 @@ canvas.addEventListener('pointerleave', () => {
 });
 
 canvas.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
   const { x, y } = canvasCoords(e);
+  
   const p = hitPerson(x, y);
   if (p) { p.jumpVy = -260 * S; p.jumpY = 0; p.waveT = 1.4; p.startleT = 2.6; p.pauseT = 0; p.dir = x > p.x ? -1 : 1; ripples.push({ x, y, r: 0, maxR: 44 * S, life: 0.6, maxLife: 0.6, color: [255, 220, 120] }); return; }
+  
   const L = hitLight(x, y);
   if (L) { L.override = L.override === null ? false : L.override === false ? true : null; ripples.push({ x, y, r: 0, maxR: 44 * S, life: 0.6, maxLife: 0.6, color: [255, 235, 170] }); return; }
+  
   const b = hitBuilding(x, y);
-  if (b) { b.lightOverride = b.lightOverride === null ? false : b.lightOverride === false ? true : null; ripples.push({ x, y, r: 0, maxR: 44 * S, life: 0.6, maxLife: 0.6, color: [255, 215, 140] }); return; }
+  if (b) { 
+    miniMeteors.push({ sx: x, sy: -50, tx: b.x + b.w/2, ty: b.y, t: 0, dur: 0.4, target: b });
+    return; 
+  }
+  
   if (hitRoad(x, y)) {
     const lane = (y - roadY) / roadH < 0.5 ? 0 : 1, dir = lane === 0 ? 1 : -1, palette = ['#c8494a', '#3a6ea5', '#d9b23a', '#dcdcdc', '#2b2b3c', '#4a8a6a', '#8a5ab0'], sp = rand(70, 135) * S;
     cars.push({ x, y: roadY + roadH * (lane === 0 ? 0.30 : 0.72), dir, baseSpeed: sp, currentSpeed: sp, color: palette[(Math.random() * palette.length) | 0], len: rand(46, 64) * S, h: rand(15, 19) * S });
     ripples.push({ x, y, r: 0, maxR: 44 * S, life: 0.6, maxLife: 0.6, color: [150, 200, 255] }); return;
   }
+  
   if (lastDarkness > 0.4) launchFirework(x, y);
   else ripples.push({ x, y, r: 0, maxR: 44 * S, life: 0.6, maxLife: 0.6, color: [220, 230, 255] });
 });
@@ -787,13 +868,46 @@ canvas.addEventListener('pointerdown', (e) => {
 window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k === 'm' || k === 'ь') triggerMeteor();
-  else if (k === 'w' || k === 'ц') cycleWeather();
   else if (k === 'e' || k === 'у') quakeT = 3;
   else if (k === 'u' || k === 'г') spawnUfo();
+  else if (k === 'g' || k === 'п') grainEnabled = !grainEnabled;
+});
+
+/* Логика меню (FAB) */
+const fabToggle = document.getElementById('fabToggle');
+const fabMenu = document.getElementById('fabMenu');
+const fabSubmenu = document.getElementById('fabSubmenu');
+const btnWeather = document.getElementById('btnWeather');
+
+fabToggle.addEventListener('click', () => {
+  fabMenu.classList.toggle('open');
+  fabToggle.classList.toggle('open');
+  if (!fabMenu.classList.contains('open')) fabSubmenu.classList.remove('open');
+});
+
+btnWeather.addEventListener('click', () => {
+  fabSubmenu.classList.toggle('open');
+});
+
+document.querySelectorAll('.fab-subitem').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    const type = e.target.getAttribute('data-weather');
+    setWeather(type);
+    fabSubmenu.classList.remove('open'); 
+  });
+});
+
+document.getElementById('btnMeteor').addEventListener('click', () => triggerMeteor());
+document.getElementById('btnQuake').addEventListener('click', () => quakeT = 3);
+document.getElementById('btnUfo').addEventListener('click', () => spawnUfo());
+document.getElementById('btnFirework').addEventListener('click', () => {
+  for(let i=0; i<5; i++) {
+    setTimeout(() => launchFirework(rand(W*0.2, W*0.8), rand(groundY*0.1, groundY*0.5)), i * 150);
+  }
 });
 
 /* Главный цикл */
-let lastT = performance.now(), clockCache = '', cdCache = '';
+let lastT = performance.now(), clockCache = '';
 
 function frame(now) {
   const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now; elapsed += dt; tNorm = (tNorm + dt / CYCLE) % 1;
@@ -817,17 +931,19 @@ function frame(now) {
     for (const st of stars) { const tw = 0.55 + 0.45 * Math.sin(elapsed * st.spd + st.ph); ctx.fillStyle = `rgba(255,255,255,${sky.stars * st.a * tw})`; ctx.fillRect(st.x, st.y, st.r, st.r); }
   }
 
-  drawCelestial(tNorm); drawBuildings(sky, darkness, hoveredBuilding); drawTrafficLights();
-  drawRoad(sky); drawSidewalk(sky); drawStreetlights(darkness, hoveredLight); drawCrater(); drawBirds();
-  drawPeople(); drawCars(darkness); drawUfos(); drawFireworks(); drawRain(); drawSnow(); drawLightnings();
-  drawMeteorTrail(); drawBoomParticles(); drawShockwave(); drawRipples();
+  drawCelestial(tNorm); drawBuildings(sky, darkness, hoveredBuilding);
+  drawRoad(sky); drawSidewalk(sky); drawStreetlights(darkness, hoveredLight); 
+  drawBirds(); drawPeople(); drawCars(darkness); drawUfos(); drawFireworks(); 
+  drawRain(); drawSnow(); drawLightnings();
+  
+  drawBoomParticles(); drawMeteorTrail(); drawShockwave(); drawRipples();
 
   if (shaking) ctx.restore();
   drawFog();
   if (lightningFlash > 0) { ctx.fillStyle = `rgba(200,220,255,${lightningFlash * 0.4})`; ctx.fillRect(0, 0, W, H); }
   if (meteor.flash > 0) { ctx.fillStyle = `rgba(255,245,220,${meteor.flash})`; ctx.fillRect(0, 0, W, H); }
 
-  if (grainPattern) { ctx.save(); ctx.globalAlpha = 0.04; ctx.fillStyle = grainPattern; ctx.fillRect(0, 0, W, H); ctx.restore(); }
+  if (grainPattern && grainEnabled) { ctx.save(); ctx.globalAlpha = 0.04; ctx.fillStyle = grainPattern; ctx.fillRect(0, 0, W, H); ctx.restore(); }
 
   const vg = ctx.createRadialGradient(W / 2, H * 0.55, Math.min(W, H) * 0.32, W / 2, H * 0.55, Math.max(W, H) * 0.78);
   vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, `rgba(0,0,0,${0.32 + darkness * 0.28})`);
@@ -835,11 +951,6 @@ function frame(now) {
 
   const totalMin = Math.floor(tNorm * 24 * 60), hh = String(Math.floor(totalMin / 60)).padStart(2, '0'), mm = String(totalMin % 60).padStart(2, '0');
   if (`${hh}:${mm}` !== clockCache) { clockCache = `${hh}:${mm}`; clockEl.textContent = clockCache; }
-
-  if (!meteor.triggered) {
-    const remain = Math.max(0, CYCLE * 2 - elapsed), s = Math.ceil(remain), cm = String(Math.floor(s / 60)).padStart(2, '0'), cs = String(s % 60).padStart(2, '0'), txt = `☄ ${cm}:${cs}`;
-    if (txt !== cdCache) { cdCache = txt; countdownEl.textContent = txt; countdownEl.classList.toggle('urgent', remain <= 10); }
-  } else if (countdownEl.style.display !== 'none') countdownEl.style.display = 'none';
 
   requestAnimationFrame(frame);
 }
@@ -849,8 +960,7 @@ function resize() {
   W = canvas.clientWidth; H = canvas.clientHeight; canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   S = Math.max(0.62, H / 850); groundY = H * 0.70; sidewalkY = groundY; sidewalkH = H * 0.11; roadY = sidewalkY + sidewalkH; roadH = H - roadY;
-  generateStars(); generateCity(); generateLights(); initTrafficLights(); generatePeople(); generateCars();
-  if (meteor.triggered) meteor.iy = groundY + sidewalkH * 0.4;
+  generateStars(); generateCity(); generateLights(); generatePeople(); generateCars();
   grainPattern = ctx.createPattern(grainCanvas, 'repeat');
 }
 
